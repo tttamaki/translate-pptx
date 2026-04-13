@@ -69,6 +69,7 @@ class SlideProgressTracker:
         self.total_slides = total_slides
         self._progress = st.progress(0)
         self._start_time = time.time()
+        self._details = st.empty()
 
     def is_empty(self):
         return self.total_slides == 0
@@ -89,6 +90,16 @@ class SlideProgressTracker:
 
     def finish(self):
         self._progress.empty()
+
+    def update_translation_preview(self, slide_number, translation_pairs, max_items=10):
+        if not translation_pairs:
+            self._details.code(f"Slide {slide_number}: no translatable text", language="text")
+            return
+
+        lines = [f"Slide {slide_number} translation pairs (showing first {max_items})"]
+        for idx, (before, after) in enumerate(translation_pairs[:max_items], start=1):
+            lines.append(f"[{idx}] {before} --> {after}")
+        self._details.code("\n".join(lines).rstrip(), language="text")
 
 
 async def translate_slide_texts(translator, texts, target_lang='ja', source_lang='auto', retries=3):
@@ -135,7 +146,9 @@ def extract_translatable_runs_by_slide(prs):
 
 async def translate_runs_in_slide(translator, runs, target_lang='ja', source_lang='auto'):
     if not runs:
-        return
+        return []
+
+    original_texts = [run.text for run in runs]
 
     segments = []
     translated_parts = {}
@@ -173,8 +186,10 @@ async def translate_runs_in_slide(translator, runs, target_lang='ja', source_lan
     for run_idx, parts in translated_parts.items():
         runs[run_idx].text = "".join(parts)
 
+    return [(original_texts[i], runs[i].text) for i in range(len(runs))]
 
-async def translate_pptx_standard_async(input_pptx_file, target_lang='ja', source_lang='auto'):
+
+async def translate_pptx_standard_async(input_pptx_file, target_lang='ja', source_lang='auto', preview_limit=10):
     prs = Presentation(input_pptx_file)
     new_prs = copy.deepcopy(prs)
 
@@ -185,6 +200,7 @@ async def translate_pptx_standard_async(input_pptx_file, target_lang='ja', sourc
 
     if progress_tracker.is_empty():
         progress_tracker.show_empty()
+        progress_tracker.update_translation_preview(0, [], max_items=preview_limit)
         progress_tracker.finish()
         output = io.BytesIO()
         new_prs.save(output)
@@ -193,7 +209,7 @@ async def translate_pptx_standard_async(input_pptx_file, target_lang='ja', sourc
 
     async with Translator() as translator:  # type: ignore[attr-defined]
         for idx, runs in enumerate(slide_runs):
-            await translate_runs_in_slide(
+            translation_pairs = await translate_runs_in_slide(
                 translator,
                 runs,
                 target_lang=target_lang,
@@ -201,6 +217,11 @@ async def translate_pptx_standard_async(input_pptx_file, target_lang='ja', sourc
             )
 
             progress_tracker.update(idx + 1)
+            progress_tracker.update_translation_preview(
+                idx + 1,
+                translation_pairs,
+                max_items=preview_limit,
+            )
 
     progress_tracker.finish()
     output = io.BytesIO()
@@ -209,12 +230,13 @@ async def translate_pptx_standard_async(input_pptx_file, target_lang='ja', sourc
     return output
 
 
-def translate_pptx_standard(input_pptx_file, target_lang='ja', source_lang='auto'):
+def translate_pptx_standard(input_pptx_file, target_lang='ja', source_lang='auto', preview_limit=10):
     return asyncio.run(
         translate_pptx_standard_async(
             input_pptx_file,
             target_lang=target_lang,
             source_lang=source_lang,
+            preview_limit=preview_limit,
         )
     )
 
@@ -290,11 +312,14 @@ def render_translate_mode():
         index=0,
     )
     uploaded = st.file_uploader("Upload PPTX for Translation", type=["pptx"], key="upload-translate")
-    st.markdown("""
-    - Empty and numeric-only strings are skipped.
-    - Text is translated in slide-level batches with character-limit splitting.
-    - Images and formatting are preserved.
-    """)
+    preview_limit = st.number_input(
+        "Displayed translation pairs per slide",
+        min_value=1,
+        max_value=100,
+        value=10,
+        step=1,
+    )
+
     if uploaded:
         st.success(f"File uploaded: {uploaded.name}")
         if source_lang == target_lang:
@@ -302,7 +327,12 @@ def render_translate_mode():
         elif st.button("🚀 Translate"):
             start = time.time()
             with st.spinner("Translating slides..."):
-                translated_bytes = translate_pptx_standard(uploaded, target_lang, source_lang)
+                translated_bytes = translate_pptx_standard(
+                    uploaded,
+                    target_lang,
+                    source_lang,
+                    preview_limit=int(preview_limit),
+                )
             st.success(f"Translated in {time.time()-start:.1f} seconds!")
             filename = (
                 f"translated_{get_language_name(source_lang)}_"
