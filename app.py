@@ -321,26 +321,44 @@ def render_translate_mode():
         step=1,
     )
 
+    if 'translating' not in st.session_state:
+        st.session_state.translating = False
+
     if uploaded:
         st.success(f"File uploaded: {uploaded.name}")
         if source_lang == target_lang:
             st.error("Source and target languages cannot be the same!")
-        elif st.button("🚀 Translate"):
-            start = time.time()
-            with st.spinner("Translating slides..."):
-                translated_bytes = translate_pptx_standard(
-                    uploaded,
-                    target_lang,
-                    source_lang,
-                    preview_limit=int(preview_limit),
-                )
-            st.success(f"Translated in {time.time()-start:.1f} seconds!")
-            uploaded_path = Path(uploaded.name)
-            filename = f"{uploaded_path.stem}_{target_lang}{uploaded_path.suffix}"
+        else:
+            if st.session_state.translating:
+                st.button("Translating...", disabled=True, key="run-translate")
+                start = time.time()
+                with st.spinner("Translating slides..."):
+                    translated_bytes = translate_pptx_standard(
+                        uploaded,
+                        target_lang,
+                        source_lang,
+                        preview_limit=int(preview_limit),
+                    )
+                uploaded_path = Path(uploaded.name)
+                st.session_state.translate_result = {
+                    'bytes': translated_bytes.getvalue(),
+                    'filename': f"{uploaded_path.stem}_{target_lang}{uploaded_path.suffix}",
+                    'elapsed': time.time() - start,
+                }
+                st.session_state.translating = False
+                st.rerun()
+            else:
+                if st.button("🚀 Translate", key="run-translate"):
+                    st.session_state.translating = True
+                    st.rerun()
+
+        result = st.session_state.get('translate_result')
+        if result:
+            st.success(f"Translated in {result['elapsed']:.1f} seconds!")
             st.download_button(
                 "⬇️ Download Translated PPTX",
-                data=translated_bytes,
-                file_name=filename,
+                data=result['bytes'],
+                file_name=result['filename'],
                 mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
             )
 
