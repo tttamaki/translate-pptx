@@ -8,6 +8,7 @@ This is a simple Streamlit app that translates text inside `.pptx` (PowerPoint) 
 
 - Upload a PowerPoint `.pptx` file.
 - Automatically detect and translate text in slide-level batches.
+- Split long text and large slide batches by character limits (15k) before translation.
 - Reuse a single `Translator` instance per uploaded file.
 - Translate to **Japanese** using Google Translate.
 - Download the translated `.pptx` file.

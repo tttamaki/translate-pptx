@@ -7,6 +7,53 @@ import asyncio
 from datetime import datetime
 from googletrans import Translator
 
+MAX_SINGLE_TEXT_CHARS = 15000
+MAX_BATCH_TOTAL_CHARS = 15000
+
+
+def split_text_by_char_limit(text, char_limit=MAX_SINGLE_TEXT_CHARS):
+    if len(text) <= char_limit:
+        return [text]
+
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = min(start + char_limit, len(text))
+        if end < len(text):
+            split_at = text.rfind("\n", start, end)
+            if split_at <= start:
+                split_at = text.rfind(" ", start, end)
+            if split_at <= start:
+                split_at = end
+            else:
+                split_at += 1
+        else:
+            split_at = end
+        chunks.append(text[start:split_at])
+        start = split_at
+    return chunks
+
+
+def build_char_limited_batches(segments, char_limit=MAX_BATCH_TOTAL_CHARS):
+    batches = []
+    current = []
+    current_chars = 0
+
+    for segment in segments:
+        text = segment[2]
+        text_len = len(text)
+        if current and current_chars + text_len > char_limit:
+            batches.append(current)
+            current = []
+            current_chars = 0
+        current.append(segment)
+        current_chars += text_len
+
+    if current:
+        batches.append(current)
+
+    return batches
+
 async def translate_slide_texts(translator, texts, target_lang='ja', source_lang='auto', retries=3):
     for attempt in range(retries):
         try:
@@ -21,16 +68,16 @@ async def translate_slide_texts(translator, texts, target_lang='ja', source_lang
     return texts
 
 
-async def translate_run_fallback(translator, run, target_lang='ja', source_lang='auto', retries=3):
+async def translate_single_text(translator, text, target_lang='ja', source_lang='auto', retries=3):
     for attempt in range(retries):
         try:
-            result = await translator.translate(run.text, src=source_lang, dest=target_lang)
-            run.text = result.text
-            return
+            result = await translator.translate(text, src=source_lang, dest=target_lang)
+            return result.text
         except Exception:
             if attempt == retries - 1:
-                return
+                return text
             await asyncio.sleep(1)
+    return text
 
 
 async def translate_pptx_standard_async(input_pptx_file, target_lang='ja', source_lang='auto'):
@@ -56,24 +103,41 @@ async def translate_pptx_standard_async(input_pptx_file, target_lang='ja', sourc
     async with Translator() as translator:  # type: ignore[attr-defined]
         for idx, runs in enumerate(slide_runs):
             if runs:
-                texts = [run.text for run in runs]
-                try:
-                    translated_texts = await translate_slide_texts(
-                        translator,
-                        texts,
-                        target_lang=target_lang,
-                        source_lang=source_lang,
-                    )
-                    for run, translated in zip(runs, translated_texts):
-                        run.text = translated
-                except Exception:
-                    for run in runs:
-                        await translate_run_fallback(
+                segments = []
+                translated_parts = {}
+                for run_idx, run in enumerate(runs):
+                    parts = split_text_by_char_limit(run.text)
+                    translated_parts[run_idx] = [""] * len(parts)
+                    for part_idx, part in enumerate(parts):
+                        segments.append((run_idx, part_idx, part))
+
+                batches = build_char_limited_batches(segments)
+                for batch in batches:
+                    batch_texts = [segment[2] for segment in batch]
+                    try:
+                        batch_translated = await translate_slide_texts(
                             translator,
-                            run,
+                            batch_texts,
                             target_lang=target_lang,
                             source_lang=source_lang,
                         )
+                    except Exception:
+                        batch_translated = []
+                        for text in batch_texts:
+                            translated = await translate_single_text(
+                                translator,
+                                text,
+                                target_lang=target_lang,
+                                source_lang=source_lang,
+                            )
+                            batch_translated.append(translated)
+
+                    for segment, translated in zip(batch, batch_translated):
+                        run_idx, part_idx, _ = segment
+                        translated_parts[run_idx][part_idx] = translated
+
+                for run_idx, parts in translated_parts.items():
+                    runs[run_idx].text = "".join(parts)
 
             progress.progress((idx + 1) / total_slides if total_slides else 1.0)
 
@@ -166,7 +230,7 @@ if mode == "Translate":
     uploaded = st.file_uploader("Upload PPTX for Translation", type=["pptx"], key="upload-translate")
     st.markdown("""
     - Empty and numeric-only strings are skipped.
-    - Text is translated in slide-level batches.
+    - Text is translated in slide-level batches with character-limit splitting.
     - Images and formatting are preserved.
     """)
     if uploaded:
