@@ -54,6 +54,14 @@ def build_char_limited_batches(segments, char_limit=MAX_BATCH_TOTAL_CHARS):
 
     return batches
 
+
+def format_seconds_to_hhmmss(seconds):
+    total_seconds = max(0, int(seconds))
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    secs = total_seconds % 60
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
 async def translate_slide_texts(translator, texts, target_lang='ja', source_lang='auto', retries=3):
     for attempt in range(retries):
         try:
@@ -99,6 +107,15 @@ async def translate_pptx_standard_async(input_pptx_file, target_lang='ja', sourc
 
     total_slides = len(slide_runs)
     progress = st.progress(0)
+    translation_start_time = time.time()
+
+    if total_slides == 0:
+        progress.progress(1.0, text="slide 0 / 0 | ETA 00:00:00")
+        progress.empty()
+        output = io.BytesIO()
+        new_prs.save(output)
+        output.seek(0)
+        return output
 
     async with Translator() as translator:  # type: ignore[attr-defined]
         for idx, runs in enumerate(slide_runs):
@@ -139,7 +156,16 @@ async def translate_pptx_standard_async(input_pptx_file, target_lang='ja', sourc
                 for run_idx, parts in translated_parts.items():
                     runs[run_idx].text = "".join(parts)
 
-            progress.progress((idx + 1) / total_slides if total_slides else 1.0)
+            completed_slides = idx + 1
+            elapsed = time.time() - translation_start_time
+            avg_per_slide = elapsed / completed_slides
+            remaining_slides = total_slides - completed_slides
+            eta_seconds = remaining_slides * avg_per_slide
+            progress_text = (
+                f"slide {completed_slides} / {total_slides} "
+                f"| ETA {format_seconds_to_hhmmss(eta_seconds)}"
+            )
+            progress.progress(completed_slides / total_slides, text=progress_text)
 
     progress.empty()
     output = io.BytesIO()
