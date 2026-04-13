@@ -25,7 +25,7 @@ def translate_pptx_standard(input_pptx_file, target_lang='ja', source_lang='auto
                 for paragraph in shape.text_frame.paragraphs:
                     for run in paragraph.runs:
                         txt = run.text.strip()
-                        if len(txt) > 2 and not txt.isdigit():
+                        if len(txt) > 0 and not txt.isdigit():
                             runs.append(run)
     progress = st.progress(0)
     for idx, run in enumerate(runs):
