@@ -290,24 +290,44 @@ async def _translate_one_slide_in_prs_async(
     source_lang,
     para_concurrency=1,
 ):
+    """Returns (pairs, timing_dict)."""
+    t0 = time.perf_counter()
+
     if slide_idx >= len(prs.slides):
-        return []
+        return [], {}
 
     paragraphs = extract_translatable_paragraphs_from_slide(prs.slides[slide_idx])
-    if not paragraphs:
-        return []
+    t_extract = time.perf_counter() - t0
 
+    if not paragraphs:
+        return [], {'extract': t_extract, 'translator_init': 0.0, 'translate': 0.0, 'total': t_extract, 'n_para': 0}
+
+    t1 = time.perf_counter()
     async with Translator() as translator:  # type: ignore[attr-defined]
-        return await translate_paragraphs_in_slide(
+        t_init = time.perf_counter() - t1
+        t2 = time.perf_counter()
+        pairs = await translate_paragraphs_in_slide(
             translator,
             paragraphs,
             target_lang=target_lang,
             source_lang=source_lang,
             para_concurrency=para_concurrency,
         )
+        t_translate = time.perf_counter() - t2
+
+    t_total = time.perf_counter() - t0
+    timing = {
+        'extract': t_extract,
+        'translator_init': t_init,
+        'translate': t_translate,
+        'total': t_total,
+        'n_para': len(paragraphs),
+    }
+    return pairs, timing
 
 
 def translate_one_slide_in_prs(prs, slide_idx, target_lang, source_lang, para_concurrency=1):
+    """Returns (pairs, timing_dict)."""
     return asyncio.run(
         _translate_one_slide_in_prs_async(
             prs,
@@ -416,6 +436,7 @@ def render_translate_mode():
         ('translate_preview_limit', 10),
         ('translate_para_concurrency', 1),
         ('translate_last_pairs', []),
+        ('translate_timing_log', []),
         ('translate_result', None),
         ('translate_filename', ''),
     ]:
@@ -441,6 +462,7 @@ def render_translate_mode():
                     st.session_state.translate_preview_limit = int(preview_limit)
                     st.session_state.translate_para_concurrency = int(para_concurrency)
                     st.session_state.translate_last_pairs = []
+                    st.session_state.translate_timing_log = []
                     st.session_state.translate_result = None
                     st.session_state.translate_filename = (
                         f"{uploaded_path.stem}_{target_lang}{uploaded_path.suffix}"
@@ -476,26 +498,32 @@ def render_translate_mode():
 
                 if st.session_state.stop_requested or idx >= total:
                     stopped = st.session_state.stop_requested
+                    t_save0 = time.perf_counter()
                     output = io.BytesIO()
                     st.session_state.translate_prs.save(output)
                     output.seek(0)
+                    t_save = time.perf_counter() - t_save0
                     st.session_state.translate_result = {
                         'bytes': output.getvalue(),
                         'filename': st.session_state.translate_filename,
                         'elapsed': elapsed,
                         'stopped': stopped,
+                        'save_sec': t_save,
+                        'timing_log': list(st.session_state.translate_timing_log),
                     }
                     st.session_state.translating = False
                     st.session_state.translate_prs = None
                     st.rerun()
                 else:
-                    pairs = translate_one_slide_in_prs(
+                    pairs, timing = translate_one_slide_in_prs(
                         st.session_state.translate_prs,
                         idx,
                         st.session_state.translate_target_lang,
                         st.session_state.translate_source_lang,
                         para_concurrency=st.session_state.translate_para_concurrency,
                     )
+                    timing['slide'] = idx + 1
+                    st.session_state.translate_timing_log.append(timing)
                     st.session_state.translate_last_pairs = pairs[:lim]
                     st.session_state.translate_current_slide = idx + 1
                     st.rerun()
@@ -506,6 +534,24 @@ def render_translate_mode():
                 st.warning(f"Stopped after {result['elapsed']:.1f} seconds. Partial translation saved.")
             else:
                 st.success(f"Translated in {result['elapsed']:.1f} seconds!")
+
+            # --- Profiling log ---
+            log = result.get('timing_log', [])
+            if log:
+                header = f"{'slide':>5}  {'npara':>5}  {'extract':>8}  {'init':>8}  {'translate':>9}  {'total':>8}"
+                rows = [header, '-' * len(header)]
+                for t in log:
+                    rows.append(
+                        f"{t['slide']:>5}  {t['n_para']:>5}  "
+                        f"{t['extract']:>7.3f}s  {t['translator_init']:>7.3f}s  "
+                        f"{t['translate']:>8.3f}s  {t['total']:>7.3f}s"
+                    )
+                save_sec = result.get('save_sec', 0.0)
+                rows.append('-' * len(header))
+                rows.append(f"Final save: {save_sec:.3f}s   Total elapsed: {result['elapsed']:.1f}s")
+                with st.expander("Profiling log (per slide)", expanded=True):
+                    st.code('\n'.join(rows), language='text')
+
             st.download_button(
                 "⬇️ Download Translated PPTX",
                 data=result['bytes'],
