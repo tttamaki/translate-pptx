@@ -144,52 +144,82 @@ def extract_translatable_paragraphs_by_slide(prs):
     return slide_paragraphs
 
 
-async def translate_paragraphs_in_slide(translator, paragraphs, target_lang='ja', source_lang='auto'):
+async def translate_paragraphs_in_slide(
+    translator,
+    paragraphs,
+    target_lang='ja',
+    source_lang='auto',
+    para_concurrency=1,
+):
     if not paragraphs:
         return []
 
     original_texts = [paragraph.text for paragraph in paragraphs]
+    translated_texts = [paragraph.text for paragraph in paragraphs]
 
-    segments = []
-    translated_parts = {}
-    for paragraph_idx, paragraph in enumerate(paragraphs):
-        parts = split_text_by_char_limit(paragraph.text)
-        translated_parts[paragraph_idx] = [""] * len(parts)
-        for part_idx, part in enumerate(parts):
-            segments.append((paragraph_idx, part_idx, part))
+    concurrency = max(1, int(para_concurrency))
+    semaphore = asyncio.Semaphore(concurrency)
 
-    batches = build_char_limited_batches(segments)
-    for batch in batches:
-        batch_texts = [segment[2] for segment in batch]
-        try:
-            batch_translated = await translate_slide_texts(
-                translator,
-                batch_texts,
-                target_lang=target_lang,
-                source_lang=source_lang,
-            )
-        except Exception:
-            batch_translated = []
-            for text in batch_texts:
-                translated = await translate_single_text(
-                    translator,
-                    text,
-                    target_lang=target_lang,
-                    source_lang=source_lang,
-                )
-                batch_translated.append(translated)
+    async def _translate_single_paragraph(paragraph_idx, paragraph_text):
+        if not paragraph_text:
+            return paragraph_idx, paragraph_text
 
-        for segment, translated in zip(batch, batch_translated):
-            paragraph_idx, part_idx, _ = segment
-            translated_parts[paragraph_idx][part_idx] = translated
+        async with semaphore:
+            segments = []
+            translated_parts = {}
+            parts = split_text_by_char_limit(paragraph_text)
+            translated_parts[paragraph_idx] = [""] * len(parts)
+            for part_idx, part in enumerate(parts):
+                segments.append((paragraph_idx, part_idx, part))
 
-    for paragraph_idx, parts in translated_parts.items():
-        paragraphs[paragraph_idx].text = "".join(parts)
+            batches = build_char_limited_batches(segments)
+            for batch in batches:
+                batch_texts = [segment[2] for segment in batch]
+                try:
+                    batch_translated = await translate_slide_texts(
+                        translator,
+                        batch_texts,
+                        target_lang=target_lang,
+                        source_lang=source_lang,
+                    )
+                except Exception:
+                    batch_translated = []
+                    for text in batch_texts:
+                        translated = await translate_single_text(
+                            translator,
+                            text,
+                            target_lang=target_lang,
+                            source_lang=source_lang,
+                        )
+                        batch_translated.append(translated)
+
+                for segment, translated in zip(batch, batch_translated):
+                    _, part_idx, _ = segment
+                    translated_parts[paragraph_idx][part_idx] = translated
+
+            return paragraph_idx, "".join(translated_parts[paragraph_idx])
+
+    tasks = [
+        _translate_single_paragraph(paragraph_idx, paragraph.text)
+        for paragraph_idx, paragraph in enumerate(paragraphs)
+    ]
+    translated_results = await asyncio.gather(*tasks)
+    for paragraph_idx, translated_text in translated_results:
+        translated_texts[paragraph_idx] = translated_text
+
+    for paragraph_idx, translated_text in enumerate(translated_texts):
+        paragraphs[paragraph_idx].text = translated_text
 
     return [(original_texts[i], paragraphs[i].text) for i in range(len(paragraphs))]
 
 
-async def translate_pptx_standard_async(input_pptx_file, target_lang='ja', source_lang='auto', preview_limit=10):
+async def translate_pptx_standard_async(
+    input_pptx_file,
+    target_lang='ja',
+    source_lang='auto',
+    preview_limit=10,
+    para_concurrency=1,
+):
     prs = Presentation(input_pptx_file)
     new_prs = copy.deepcopy(prs)
 
@@ -214,6 +244,7 @@ async def translate_pptx_standard_async(input_pptx_file, target_lang='ja', sourc
                 paragraphs,
                 target_lang=target_lang,
                 source_lang=source_lang,
+                para_concurrency=para_concurrency,
             )
 
             progress_tracker.update(idx + 1)
@@ -230,18 +261,25 @@ async def translate_pptx_standard_async(input_pptx_file, target_lang='ja', sourc
     return output
 
 
-def translate_pptx_standard(input_pptx_file, target_lang='ja', source_lang='auto', preview_limit=10):
+def translate_pptx_standard(
+    input_pptx_file,
+    target_lang='ja',
+    source_lang='auto',
+    preview_limit=10,
+    para_concurrency=1,
+):
     return asyncio.run(
         translate_pptx_standard_async(
             input_pptx_file,
             target_lang=target_lang,
             source_lang=source_lang,
             preview_limit=preview_limit,
+            para_concurrency=para_concurrency,
         )
     )
 
 
-async def _translate_one_slide_async(prs_bytes, slide_idx, target_lang, source_lang):
+async def _translate_one_slide_async(prs_bytes, slide_idx, target_lang, source_lang, para_concurrency=1):
     prs = Presentation(io.BytesIO(prs_bytes))
     slide_paragraphs = extract_translatable_paragraphs_by_slide(prs)
     paragraphs = slide_paragraphs[slide_idx] if slide_idx < len(slide_paragraphs) else []
@@ -249,16 +287,26 @@ async def _translate_one_slide_async(prs_bytes, slide_idx, target_lang, source_l
     if paragraphs:
         async with Translator() as translator:  # type: ignore[attr-defined]
             pairs = await translate_paragraphs_in_slide(
-                translator, paragraphs, target_lang=target_lang, source_lang=source_lang
+                translator,
+                paragraphs,
+                target_lang=target_lang,
+                source_lang=source_lang,
+                para_concurrency=para_concurrency,
             )
     out = io.BytesIO()
     prs.save(out)
     return out.getvalue(), pairs
 
 
-def translate_one_slide(prs_bytes, slide_idx, target_lang, source_lang):
+def translate_one_slide(prs_bytes, slide_idx, target_lang, source_lang, para_concurrency=1):
     return asyncio.run(
-        _translate_one_slide_async(prs_bytes, slide_idx, target_lang, source_lang)
+        _translate_one_slide_async(
+            prs_bytes,
+            slide_idx,
+            target_lang,
+            source_lang,
+            para_concurrency=para_concurrency,
+        )
     )
 
 
@@ -340,6 +388,12 @@ def render_translate_mode():
         value=10,
         step=1,
     )
+    para_concurrency = st.selectbox(
+        "Paragraph translation concurrency",
+        options=[1, 2, 4, 8],
+        index=0,
+        help="Higher values can be faster but may hit API rate limits.",
+    )
 
     for key, default in [
         ('translating', False),
@@ -351,6 +405,7 @@ def render_translate_mode():
         ('translate_target_lang', 'ja'),
         ('translate_source_lang', 'auto'),
         ('translate_preview_limit', 10),
+        ('translate_para_concurrency', 1),
         ('translate_last_pairs', []),
         ('translate_result', None),
         ('translate_filename', ''),
@@ -378,6 +433,7 @@ def render_translate_mode():
                     st.session_state.translate_target_lang = target_lang
                     st.session_state.translate_source_lang = source_lang
                     st.session_state.translate_preview_limit = int(preview_limit)
+                    st.session_state.translate_para_concurrency = int(para_concurrency)
                     st.session_state.translate_last_pairs = []
                     st.session_state.translate_result = None
                     st.session_state.translate_filename = (
@@ -428,6 +484,7 @@ def render_translate_mode():
                         idx,
                         st.session_state.translate_target_lang,
                         st.session_state.translate_source_lang,
+                        para_concurrency=st.session_state.translate_para_concurrency,
                     )
                     st.session_state.translate_output_bytes = out_bytes
                     st.session_state.translate_last_pairs = pairs[:lim]
