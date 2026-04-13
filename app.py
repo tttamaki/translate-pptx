@@ -90,12 +90,9 @@ async def translate_single_text(translator, text, target_lang='ja', source_lang=
     return text
 
 
-async def translate_pptx_standard_async(input_pptx_file, target_lang='ja', source_lang='auto'):
-    prs = Presentation(input_pptx_file)
-    new_prs = copy.deepcopy(prs)
-
+def extract_translatable_runs_by_slide(prs):
     slide_runs = []
-    for slide in new_prs.slides:
+    for slide in prs.slides:
         current_slide_runs = []
         for shape in slide.shapes:
             text_frame = getattr(shape, "text_frame", None)
@@ -106,6 +103,55 @@ async def translate_pptx_standard_async(input_pptx_file, target_lang='ja', sourc
                         if len(txt) > 0 and not txt.isdigit() and not txt.isascii():
                             current_slide_runs.append(run)
         slide_runs.append(current_slide_runs)
+    return slide_runs
+
+
+async def translate_runs_in_slide(translator, runs, target_lang='ja', source_lang='auto'):
+    if not runs:
+        return
+
+    segments = []
+    translated_parts = {}
+    for run_idx, run in enumerate(runs):
+        parts = split_text_by_char_limit(run.text)
+        translated_parts[run_idx] = [""] * len(parts)
+        for part_idx, part in enumerate(parts):
+            segments.append((run_idx, part_idx, part))
+
+    batches = build_char_limited_batches(segments)
+    for batch in batches:
+        batch_texts = [segment[2] for segment in batch]
+        try:
+            batch_translated = await translate_slide_texts(
+                translator,
+                batch_texts,
+                target_lang=target_lang,
+                source_lang=source_lang,
+            )
+        except Exception:
+            batch_translated = []
+            for text in batch_texts:
+                translated = await translate_single_text(
+                    translator,
+                    text,
+                    target_lang=target_lang,
+                    source_lang=source_lang,
+                )
+                batch_translated.append(translated)
+
+        for segment, translated in zip(batch, batch_translated):
+            run_idx, part_idx, _ = segment
+            translated_parts[run_idx][part_idx] = translated
+
+    for run_idx, parts in translated_parts.items():
+        runs[run_idx].text = "".join(parts)
+
+
+async def translate_pptx_standard_async(input_pptx_file, target_lang='ja', source_lang='auto'):
+    prs = Presentation(input_pptx_file)
+    new_prs = copy.deepcopy(prs)
+
+    slide_runs = extract_translatable_runs_by_slide(new_prs)
 
     total_slides = len(slide_runs)
     progress = st.progress(0)
@@ -121,42 +167,12 @@ async def translate_pptx_standard_async(input_pptx_file, target_lang='ja', sourc
 
     async with Translator() as translator:  # type: ignore[attr-defined]
         for idx, runs in enumerate(slide_runs):
-            if runs:
-                segments = []
-                translated_parts = {}
-                for run_idx, run in enumerate(runs):
-                    parts = split_text_by_char_limit(run.text)
-                    translated_parts[run_idx] = [""] * len(parts)
-                    for part_idx, part in enumerate(parts):
-                        segments.append((run_idx, part_idx, part))
-
-                batches = build_char_limited_batches(segments)
-                for batch in batches:
-                    batch_texts = [segment[2] for segment in batch]
-                    try:
-                        batch_translated = await translate_slide_texts(
-                            translator,
-                            batch_texts,
-                            target_lang=target_lang,
-                            source_lang=source_lang,
-                        )
-                    except Exception:
-                        batch_translated = []
-                        for text in batch_texts:
-                            translated = await translate_single_text(
-                                translator,
-                                text,
-                                target_lang=target_lang,
-                                source_lang=source_lang,
-                            )
-                            batch_translated.append(translated)
-
-                    for segment, translated in zip(batch, batch_translated):
-                        run_idx, part_idx, _ = segment
-                        translated_parts[run_idx][part_idx] = translated
-
-                for run_idx, parts in translated_parts.items():
-                    runs[run_idx].text = "".join(parts)
+            await translate_runs_in_slide(
+                translator,
+                runs,
+                target_lang=target_lang,
+                source_lang=source_lang,
+            )
 
             completed_slides = idx + 1
             elapsed = time.time() - translation_start_time
@@ -243,6 +259,80 @@ def get_language_name(lang_code: str) -> str:
     return languages.get(lang_code, lang_code)
 
 
+def render_translate_mode():
+    st.header("PPTX Translation")
+    source_lang = st.selectbox(
+        "Source language:",
+        ['auto', 'en', 'ja', 'es', 'fr', 'de', 'zh', 'ko'],
+        format_func=get_language_name,
+    )
+    target_lang = st.selectbox(
+        "Target language:",
+        ['ja', 'en', 'es', 'fr', 'de', 'zh', 'ko'],
+        format_func=get_language_name,
+        index=0,
+    )
+    uploaded = st.file_uploader("Upload PPTX for Translation", type=["pptx"], key="upload-translate")
+    st.markdown("""
+    - Empty and numeric-only strings are skipped.
+    - Text is translated in slide-level batches with character-limit splitting.
+    - Images and formatting are preserved.
+    """)
+    if uploaded:
+        st.success(f"File uploaded: {uploaded.name}")
+        if source_lang == target_lang:
+            st.error("Source and target languages cannot be the same!")
+        elif st.button("🚀 Translate"):
+            start = time.time()
+            with st.spinner("Translating slides..."):
+                translated_bytes = translate_pptx_standard(uploaded, target_lang, source_lang)
+            st.success(f"Translated in {time.time()-start:.1f} seconds!")
+            filename = (
+                f"translated_{get_language_name(source_lang)}_"
+                f"{get_language_name(target_lang)}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pptx"
+            )
+            st.download_button(
+                "⬇️ Download Translated PPTX",
+                data=translated_bytes,
+                file_name=filename,
+                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            )
+
+
+def render_merge_mode():
+    st.header("Merge Two PPTX Files")
+    st.markdown("""
+    - **Alternate:** A1, B1, A2, B2, ...
+    - **Append:** All slides from first, then all from second
+    - All formatting and images are preserved (to the extent python-pptx allows)
+    """)
+    merge_type = st.radio(
+        "Merge style",
+        options=["Alternate (A1, B1, ...)", "Append (A1, A2, ..., B1, B2, ...)"],
+        index=0,
+    )
+    alternate = merge_type.startswith("Alternate")
+    col1, col2 = st.columns(2)
+    with col1:
+        pptx1 = st.file_uploader("Upload PPTX File 1", type=["pptx"], key="pptx1")
+    with col2:
+        pptx2 = st.file_uploader("Upload PPTX File 2", type=["pptx"], key="pptx2")
+    if pptx1 and pptx2:
+        st.success("Both files uploaded!")
+        if st.button("🚀 Merge Presentations"):
+            start = time.time()
+            with st.spinner("Merging presentations..."):
+                pptx2.seek(0)
+                merged = merge_two_presentations(pptx1, pptx2, alternate=alternate)
+            st.success(f"Merged in {time.time()-start:.1f} seconds.")
+            st.download_button(
+                "⬇️ Download Merged PPTX",
+                data=merged,
+                file_name=f"merged_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pptx",
+                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            )
+
+
 def main():
     st.set_page_config(page_title="PPTX Tools", page_icon="🌐", layout="wide")
     st.title("🌐 PowerPoint PPTX Tools")
@@ -254,76 +344,10 @@ def main():
     )
 
     if mode == "Translate":
-        st.header("PPTX Translation")
-        source_lang = st.selectbox(
-            "Source language:",
-            ['auto', 'en', 'ja', 'es', 'fr', 'de', 'zh', 'ko'],
-            format_func=get_language_name,
-        )
-        target_lang = st.selectbox(
-            "Target language:",
-            ['ja', 'en', 'es', 'fr', 'de', 'zh', 'ko'],
-            format_func=get_language_name,
-            index=0,
-        )
-        uploaded = st.file_uploader("Upload PPTX for Translation", type=["pptx"], key="upload-translate")
-        st.markdown("""
-        - Empty and numeric-only strings are skipped.
-        - Text is translated in slide-level batches with character-limit splitting.
-        - Images and formatting are preserved.
-        """)
-        if uploaded:
-            st.success(f"File uploaded: {uploaded.name}")
-            if source_lang == target_lang:
-                st.error("Source and target languages cannot be the same!")
-            elif st.button("🚀 Translate"):
-                start = time.time()
-                with st.spinner("Translating slides..."):
-                    translated_bytes = translate_pptx_standard(uploaded, target_lang, source_lang)
-                st.success(f"Translated in {time.time()-start:.1f} seconds!")
-                filename = (
-                    f"translated_{get_language_name(source_lang)}_"
-                    f"{get_language_name(target_lang)}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pptx"
-                )
-                st.download_button(
-                    "⬇️ Download Translated PPTX",
-                    data=translated_bytes,
-                    file_name=filename,
-                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                )
+        render_translate_mode()
 
     elif mode == "Merge":
-        st.header("Merge Two PPTX Files")
-        st.markdown("""
-        - **Alternate:** A1, B1, A2, B2, ...
-        - **Append:** All slides from first, then all from second
-        - All formatting and images are preserved (to the extent python-pptx allows)
-        """)
-        merge_type = st.radio(
-            "Merge style",
-            options=["Alternate (A1, B1, ...)", "Append (A1, A2, ..., B1, B2, ...)"],
-            index=0,
-        )
-        alternate = merge_type.startswith("Alternate")
-        col1, col2 = st.columns(2)
-        with col1:
-            pptx1 = st.file_uploader("Upload PPTX File 1", type=["pptx"], key="pptx1")
-        with col2:
-            pptx2 = st.file_uploader("Upload PPTX File 2", type=["pptx"], key="pptx2")
-        if pptx1 and pptx2:
-            st.success("Both files uploaded!")
-            if st.button("🚀 Merge Presentations"):
-                start = time.time()
-                with st.spinner("Merging presentations..."):
-                    pptx2.seek(0)
-                    merged = merge_two_presentations(pptx1, pptx2, alternate=alternate)
-                st.success(f"Merged in {time.time()-start:.1f} seconds.")
-                st.download_button(
-                    "⬇️ Download Merged PPTX",
-                    data=merged,
-                    file_name=f"merged_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pptx",
-                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                )
+        render_merge_mode()
 
     st.markdown("---")
     st.caption("Built with ❤️ using Streamlit and python-pptx.")
