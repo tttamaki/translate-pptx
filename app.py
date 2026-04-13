@@ -129,18 +129,22 @@ async def translate_single_text(translator, text, target_lang='ja', source_lang=
     return text
 
 
+def extract_translatable_paragraphs_from_slide(slide):
+    paragraphs = []
+    for shape in slide.shapes:
+        text_frame = getattr(shape, "text_frame", None)
+        if text_frame is not None:
+            for paragraph in text_frame.paragraphs:
+                txt = paragraph.text.strip()
+                if len(txt) > 0 and not txt.isdigit() and not txt.isascii():
+                    paragraphs.append(paragraph)
+    return paragraphs
+
+
 def extract_translatable_paragraphs_by_slide(prs):
     slide_paragraphs = []
     for slide in prs.slides:
-        current_slide_paragraphs = []
-        for shape in slide.shapes:
-            text_frame = getattr(shape, "text_frame", None)
-            if text_frame is not None:
-                for paragraph in text_frame.paragraphs:
-                    txt = paragraph.text.strip()
-                    if len(txt) > 0 and not txt.isdigit() and not txt.isascii():
-                        current_slide_paragraphs.append(paragraph)
-        slide_paragraphs.append(current_slide_paragraphs)
+        slide_paragraphs.append(extract_translatable_paragraphs_from_slide(slide))
     return slide_paragraphs
 
 
@@ -279,29 +283,34 @@ def translate_pptx_standard(
     )
 
 
-async def _translate_one_slide_async(prs_bytes, slide_idx, target_lang, source_lang, para_concurrency=1):
-    prs = Presentation(io.BytesIO(prs_bytes))
-    slide_paragraphs = extract_translatable_paragraphs_by_slide(prs)
-    paragraphs = slide_paragraphs[slide_idx] if slide_idx < len(slide_paragraphs) else []
-    pairs = []
-    if paragraphs:
-        async with Translator() as translator:  # type: ignore[attr-defined]
-            pairs = await translate_paragraphs_in_slide(
-                translator,
-                paragraphs,
-                target_lang=target_lang,
-                source_lang=source_lang,
-                para_concurrency=para_concurrency,
-            )
-    out = io.BytesIO()
-    prs.save(out)
-    return out.getvalue(), pairs
+async def _translate_one_slide_in_prs_async(
+    prs,
+    slide_idx,
+    target_lang,
+    source_lang,
+    para_concurrency=1,
+):
+    if slide_idx >= len(prs.slides):
+        return []
+
+    paragraphs = extract_translatable_paragraphs_from_slide(prs.slides[slide_idx])
+    if not paragraphs:
+        return []
+
+    async with Translator() as translator:  # type: ignore[attr-defined]
+        return await translate_paragraphs_in_slide(
+            translator,
+            paragraphs,
+            target_lang=target_lang,
+            source_lang=source_lang,
+            para_concurrency=para_concurrency,
+        )
 
 
-def translate_one_slide(prs_bytes, slide_idx, target_lang, source_lang, para_concurrency=1):
+def translate_one_slide_in_prs(prs, slide_idx, target_lang, source_lang, para_concurrency=1):
     return asyncio.run(
-        _translate_one_slide_async(
-            prs_bytes,
+        _translate_one_slide_in_prs_async(
+            prs,
             slide_idx,
             target_lang,
             source_lang,
@@ -398,7 +407,7 @@ def render_translate_mode():
     for key, default in [
         ('translating', False),
         ('stop_requested', False),
-        ('translate_output_bytes', None),
+        ('translate_prs', None),
         ('translate_current_slide', 0),
         ('translate_total_slides', 0),
         ('translate_start_time', 0.0),
@@ -412,7 +421,6 @@ def render_translate_mode():
     ]:
         if key not in st.session_state:
             st.session_state[key] = default
-
     if uploaded:
         st.success(f"File uploaded: {uploaded.name}")
         if source_lang == target_lang:
@@ -423,12 +431,10 @@ def render_translate_mode():
                     input_bytes = uploaded.getvalue()
                     prs = Presentation(io.BytesIO(input_bytes))
                     new_prs = copy.deepcopy(prs)
-                    buf = io.BytesIO()
-                    new_prs.save(buf)
                     uploaded_path = Path(uploaded.name)
-                    st.session_state.translate_output_bytes = buf.getvalue()
+                    st.session_state.translate_prs = new_prs
                     st.session_state.translate_current_slide = 0
-                    st.session_state.translate_total_slides = len(list(prs.slides))
+                    st.session_state.translate_total_slides = len(list(new_prs.slides))
                     st.session_state.translate_start_time = time.time()
                     st.session_state.translate_target_lang = target_lang
                     st.session_state.translate_source_lang = source_lang
@@ -470,23 +476,26 @@ def render_translate_mode():
 
                 if st.session_state.stop_requested or idx >= total:
                     stopped = st.session_state.stop_requested
+                    output = io.BytesIO()
+                    st.session_state.translate_prs.save(output)
+                    output.seek(0)
                     st.session_state.translate_result = {
-                        'bytes': st.session_state.translate_output_bytes,
+                        'bytes': output.getvalue(),
                         'filename': st.session_state.translate_filename,
                         'elapsed': elapsed,
                         'stopped': stopped,
                     }
                     st.session_state.translating = False
+                    st.session_state.translate_prs = None
                     st.rerun()
                 else:
-                    out_bytes, pairs = translate_one_slide(
-                        st.session_state.translate_output_bytes,
+                    pairs = translate_one_slide_in_prs(
+                        st.session_state.translate_prs,
                         idx,
                         st.session_state.translate_target_lang,
                         st.session_state.translate_source_lang,
                         para_concurrency=st.session_state.translate_para_concurrency,
                     )
-                    st.session_state.translate_output_bytes = out_bytes
                     st.session_state.translate_last_pairs = pairs[:lim]
                     st.session_state.translate_current_slide = idx + 1
                     st.rerun()
