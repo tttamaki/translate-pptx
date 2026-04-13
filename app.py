@@ -402,12 +402,13 @@ def render_translate_mode():
         "Source language:",
         ['auto', 'en', 'ja', 'es', 'fr', 'de', 'zh', 'ko'],
         format_func=get_language_name,
+        index=2,
     )
     target_lang = st.selectbox(
         "Target language:",
         ['ja', 'en', 'es', 'fr', 'de', 'zh', 'ko'],
         format_func=get_language_name,
-        index=0,
+        index=1,
     )
     uploaded = st.file_uploader("Upload PPTX for Translation", type=["pptx"], key="upload-translate")
     preview_limit = st.number_input(
@@ -419,8 +420,8 @@ def render_translate_mode():
     )
     para_concurrency = st.selectbox(
         "Paragraph translation concurrency",
-        options=[1, 2, 4, 8],
-        index=0,
+        options=[1, 2, 4, 8, 16, 32, 64],
+        index=6,
         help="Higher values can be faster but may hit API rate limits.",
     )
 
