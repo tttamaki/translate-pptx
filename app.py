@@ -64,6 +64,33 @@ def format_seconds_to_hhmmss(seconds):
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
+class SlideProgressTracker:
+    def __init__(self, total_slides):
+        self.total_slides = total_slides
+        self._progress = st.progress(0)
+        self._start_time = time.time()
+
+    def is_empty(self):
+        return self.total_slides == 0
+
+    def show_empty(self):
+        self._progress.progress(1.0, text="slide 0 / 0 | ETA 00:00:00")
+
+    def update(self, completed_slides):
+        elapsed = time.time() - self._start_time
+        avg_per_slide = elapsed / completed_slides if completed_slides else 0
+        remaining_slides = self.total_slides - completed_slides
+        eta_seconds = remaining_slides * avg_per_slide
+        progress_text = (
+            f"slide {completed_slides} / {self.total_slides} "
+            f"| ETA {format_seconds_to_hhmmss(eta_seconds)}"
+        )
+        self._progress.progress(completed_slides / self.total_slides, text=progress_text)
+
+    def finish(self):
+        self._progress.empty()
+
+
 async def translate_slide_texts(translator, texts, target_lang='ja', source_lang='auto', retries=3):
     for attempt in range(retries):
         try:
@@ -154,12 +181,11 @@ async def translate_pptx_standard_async(input_pptx_file, target_lang='ja', sourc
     slide_runs = extract_translatable_runs_by_slide(new_prs)
 
     total_slides = len(slide_runs)
-    progress = st.progress(0)
-    translation_start_time = time.time()
+    progress_tracker = SlideProgressTracker(total_slides)
 
-    if total_slides == 0:
-        progress.progress(1.0, text="slide 0 / 0 | ETA 00:00:00")
-        progress.empty()
+    if progress_tracker.is_empty():
+        progress_tracker.show_empty()
+        progress_tracker.finish()
         output = io.BytesIO()
         new_prs.save(output)
         output.seek(0)
@@ -174,18 +200,9 @@ async def translate_pptx_standard_async(input_pptx_file, target_lang='ja', sourc
                 source_lang=source_lang,
             )
 
-            completed_slides = idx + 1
-            elapsed = time.time() - translation_start_time
-            avg_per_slide = elapsed / completed_slides
-            remaining_slides = total_slides - completed_slides
-            eta_seconds = remaining_slides * avg_per_slide
-            progress_text = (
-                f"slide {completed_slides} / {total_slides} "
-                f"| ETA {format_seconds_to_hhmmss(eta_seconds)}"
-            )
-            progress.progress(completed_slides / total_slides, text=progress_text)
+            progress_tracker.update(idx + 1)
 
-    progress.empty()
+    progress_tracker.finish()
     output = io.BytesIO()
     new_prs.save(output)
     output.seek(0)
