@@ -586,7 +586,7 @@ def render_merge_mode():
             with st.spinner("Merging presentations..."):
                 pptx2.seek(0)
                 merged = merge_two_presentations(pptx1, pptx2, alternate=alternate)
-            st.success(f"Merged in {time.time()-start:.1f} seconds.")
+            st.success(f"Merged in {time.time() - start:.1f} seconds.")
             st.download_button(
                 "⬇️ Download Merged PPTX",
                 data=merged,
