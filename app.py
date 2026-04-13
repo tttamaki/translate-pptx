@@ -129,35 +129,34 @@ async def translate_single_text(translator, text, target_lang='ja', source_lang=
     return text
 
 
-def extract_translatable_runs_by_slide(prs):
-    slide_runs = []
+def extract_translatable_paragraphs_by_slide(prs):
+    slide_paragraphs = []
     for slide in prs.slides:
-        current_slide_runs = []
+        current_slide_paragraphs = []
         for shape in slide.shapes:
             text_frame = getattr(shape, "text_frame", None)
             if text_frame is not None:
                 for paragraph in text_frame.paragraphs:
-                    for run in paragraph.runs:
-                        txt = run.text.strip()
-                        if len(txt) > 0 and not txt.isdigit() and not txt.isascii():
-                            current_slide_runs.append(run)
-        slide_runs.append(current_slide_runs)
-    return slide_runs
+                    txt = paragraph.text.strip()
+                    if len(txt) > 0 and not txt.isdigit() and not txt.isascii():
+                        current_slide_paragraphs.append(paragraph)
+        slide_paragraphs.append(current_slide_paragraphs)
+    return slide_paragraphs
 
 
-async def translate_runs_in_slide(translator, runs, target_lang='ja', source_lang='auto'):
-    if not runs:
+async def translate_paragraphs_in_slide(translator, paragraphs, target_lang='ja', source_lang='auto'):
+    if not paragraphs:
         return []
 
-    original_texts = [run.text for run in runs]
+    original_texts = [paragraph.text for paragraph in paragraphs]
 
     segments = []
     translated_parts = {}
-    for run_idx, run in enumerate(runs):
-        parts = split_text_by_char_limit(run.text)
-        translated_parts[run_idx] = [""] * len(parts)
+    for paragraph_idx, paragraph in enumerate(paragraphs):
+        parts = split_text_by_char_limit(paragraph.text)
+        translated_parts[paragraph_idx] = [""] * len(parts)
         for part_idx, part in enumerate(parts):
-            segments.append((run_idx, part_idx, part))
+            segments.append((paragraph_idx, part_idx, part))
 
     batches = build_char_limited_batches(segments)
     for batch in batches:
@@ -181,22 +180,22 @@ async def translate_runs_in_slide(translator, runs, target_lang='ja', source_lan
                 batch_translated.append(translated)
 
         for segment, translated in zip(batch, batch_translated):
-            run_idx, part_idx, _ = segment
-            translated_parts[run_idx][part_idx] = translated
+            paragraph_idx, part_idx, _ = segment
+            translated_parts[paragraph_idx][part_idx] = translated
 
-    for run_idx, parts in translated_parts.items():
-        runs[run_idx].text = "".join(parts)
+    for paragraph_idx, parts in translated_parts.items():
+        paragraphs[paragraph_idx].text = "".join(parts)
 
-    return [(original_texts[i], runs[i].text) for i in range(len(runs))]
+    return [(original_texts[i], paragraphs[i].text) for i in range(len(paragraphs))]
 
 
 async def translate_pptx_standard_async(input_pptx_file, target_lang='ja', source_lang='auto', preview_limit=10):
     prs = Presentation(input_pptx_file)
     new_prs = copy.deepcopy(prs)
 
-    slide_runs = extract_translatable_runs_by_slide(new_prs)
+    slide_paragraphs = extract_translatable_paragraphs_by_slide(new_prs)
 
-    total_slides = len(slide_runs)
+    total_slides = len(slide_paragraphs)
     progress_tracker = SlideProgressTracker(total_slides)
 
     if progress_tracker.is_empty():
@@ -209,10 +208,10 @@ async def translate_pptx_standard_async(input_pptx_file, target_lang='ja', sourc
         return output
 
     async with Translator() as translator:  # type: ignore[attr-defined]
-        for idx, runs in enumerate(slide_runs):
-            translation_pairs = await translate_runs_in_slide(
+        for idx, paragraphs in enumerate(slide_paragraphs):
+            translation_pairs = await translate_paragraphs_in_slide(
                 translator,
-                runs,
+                paragraphs,
                 target_lang=target_lang,
                 source_lang=source_lang,
             )
@@ -244,13 +243,13 @@ def translate_pptx_standard(input_pptx_file, target_lang='ja', source_lang='auto
 
 async def _translate_one_slide_async(prs_bytes, slide_idx, target_lang, source_lang):
     prs = Presentation(io.BytesIO(prs_bytes))
-    slide_runs = extract_translatable_runs_by_slide(prs)
-    runs = slide_runs[slide_idx] if slide_idx < len(slide_runs) else []
+    slide_paragraphs = extract_translatable_paragraphs_by_slide(prs)
+    paragraphs = slide_paragraphs[slide_idx] if slide_idx < len(slide_paragraphs) else []
     pairs = []
-    if runs:
+    if paragraphs:
         async with Translator() as translator:  # type: ignore[attr-defined]
-            pairs = await translate_runs_in_slide(
-                translator, runs, target_lang=target_lang, source_lang=source_lang
+            pairs = await translate_paragraphs_in_slide(
+                translator, paragraphs, target_lang=target_lang, source_lang=source_lang
             )
     out = io.BytesIO()
     prs.save(out)
