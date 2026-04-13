@@ -3,6 +3,7 @@ import copy
 import io
 import time
 from datetime import datetime
+from pathlib import Path
 
 import streamlit as st
 from googletrans import Translator
@@ -334,10 +335,8 @@ def render_translate_mode():
                     preview_limit=int(preview_limit),
                 )
             st.success(f"Translated in {time.time()-start:.1f} seconds!")
-            filename = (
-                f"translated_{get_language_name(source_lang)}_"
-                f"{get_language_name(target_lang)}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pptx"
-            )
+            uploaded_path = Path(uploaded.name)
+            filename = f"{uploaded_path.stem}_{target_lang}{uploaded_path.suffix}"
             st.download_button(
                 "⬇️ Download Translated PPTX",
                 data=translated_bytes,
