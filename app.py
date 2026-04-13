@@ -3,40 +3,94 @@ from pptx import Presentation
 import copy
 import io
 import time
+import asyncio
 from datetime import datetime
+from googletrans import Translator
 
-def translate_text(text, target_lang='ja', source_lang='auto'):
-    from googletrans import Translator
-    translator = Translator()
-    for _ in range(3):
+async def translate_slide_texts(translator, texts, target_lang='ja', source_lang='auto', retries=3):
+    for attempt in range(retries):
         try:
-            return translator.translate(text, src=source_lang, dest=target_lang).text
+            result = await translator.translate(texts, src=source_lang, dest=target_lang)
+            if isinstance(result, list):
+                return [item.text for item in result]
+            return [result.text]
         except Exception:
-            time.sleep(1)
-    return text
+            if attempt == retries - 1:
+                raise
+            await asyncio.sleep(1)
+    return texts
 
-def translate_pptx_standard(input_pptx_file, target_lang='ja', source_lang='auto'):
+
+async def translate_run_fallback(translator, run, target_lang='ja', source_lang='auto', retries=3):
+    for attempt in range(retries):
+        try:
+            result = await translator.translate(run.text, src=source_lang, dest=target_lang)
+            run.text = result.text
+            return
+        except Exception:
+            if attempt == retries - 1:
+                return
+            await asyncio.sleep(1)
+
+
+async def translate_pptx_standard_async(input_pptx_file, target_lang='ja', source_lang='auto'):
     prs = Presentation(input_pptx_file)
     new_prs = copy.deepcopy(prs)
-    runs = []
+
+    slide_runs = []
     for slide in new_prs.slides:
+        current_slide_runs = []
         for shape in slide.shapes:
-            if hasattr(shape, "text_frame") and shape.text_frame is not None:
-                for paragraph in shape.text_frame.paragraphs:
+            text_frame = getattr(shape, "text_frame", None)
+            if text_frame is not None:
+                for paragraph in text_frame.paragraphs:
                     for run in paragraph.runs:
                         txt = run.text.strip()
-                        if len(txt) > 0 and not txt.isdigit():
-                            runs.append(run)
+                        if len(txt) > 0 and not txt.isdigit() and not txt.isascii():
+                            current_slide_runs.append(run)
+        slide_runs.append(current_slide_runs)
+
+    total_slides = len(slide_runs)
     progress = st.progress(0)
-    for idx, run in enumerate(runs):
-        run.text = translate_text(run.text, target_lang, source_lang)
-        time.sleep(0.05)
-        progress.progress((idx + 1)/len(runs))
+
+    async with Translator() as translator:  # type: ignore[attr-defined]
+        for idx, runs in enumerate(slide_runs):
+            if runs:
+                texts = [run.text for run in runs]
+                try:
+                    translated_texts = await translate_slide_texts(
+                        translator,
+                        texts,
+                        target_lang=target_lang,
+                        source_lang=source_lang,
+                    )
+                    for run, translated in zip(runs, translated_texts):
+                        run.text = translated
+                except Exception:
+                    for run in runs:
+                        await translate_run_fallback(
+                            translator,
+                            run,
+                            target_lang=target_lang,
+                            source_lang=source_lang,
+                        )
+
+            progress.progress((idx + 1) / total_slides if total_slides else 1.0)
+
     progress.empty()
     output = io.BytesIO()
     new_prs.save(output)
     output.seek(0)
     return output
+
+def translate_pptx_standard(input_pptx_file, target_lang='ja', source_lang='auto'):
+    return asyncio.run(
+        translate_pptx_standard_async(
+            input_pptx_file,
+            target_lang=target_lang,
+            source_lang=source_lang,
+        )
+    )
 
 def merge_two_presentations(pptx1_file, pptx2_file, alternate=True):
     prs1 = Presentation(pptx1_file)
@@ -80,7 +134,7 @@ def merge_two_presentations(pptx1_file, pptx2_file, alternate=True):
     output.seek(0)
     return output
 
-def get_language_name(lang_code):
+def get_language_name(lang_code: str) -> str:
     languages = {
         'en': 'English',
         'ja': 'Japanese',
@@ -111,7 +165,8 @@ if mode == "Translate":
         ['ja', 'en', 'es', 'fr', 'de', 'zh', 'ko'], format_func=get_language_name, index=0)
     uploaded = st.file_uploader("Upload PPTX for Translation", type=["pptx"], key="upload-translate")
     st.markdown("""
-    - All text will be translated, but numbers and 1-2 character strings are skipped.
+    - Empty and numeric-only strings are skipped.
+    - Text is translated in slide-level batches.
     - Images and formatting are preserved.
     """)
     if uploaded:

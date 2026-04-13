@@ -1,4 +1,3 @@
-
 # 📑 PPTX English to Japanese Translator (Streamlit App)
 
 This is a simple Streamlit app that translates text inside `.pptx` (PowerPoint) files from **English to Japanese** using Google Translate (via `googletrans`). You can upload a `.pptx` file, get it translated, and download the translated version.
@@ -8,7 +7,8 @@ This is a simple Streamlit app that translates text inside `.pptx` (PowerPoint) 
 ## 🚀 Features
 
 - Upload a PowerPoint `.pptx` file.
-- Automatically detect and translate all text in slides.
+- Automatically detect and translate text in slide-level batches.
+- Reuse a single `Translator` instance per uploaded file.
 - Translate to **Japanese** using Google Translate.
 - Download the translated `.pptx` file.
 - Progress bar to show translation progress.
@@ -50,7 +50,7 @@ streamlit run app.py
 
 - `streamlit`
 - `python-pptx`
-- `googletrans==4.0.0-rc1`
+- `googletrans==4.0.2`
 
 See `requirements.txt` for the full list.
 
@@ -59,9 +59,10 @@ See `requirements.txt` for the full list.
 ## ⚠️ Known Issues / Limitations
 
 - **Googletrans is unofficial**—the app may break if Google changes its backend.
+- Google Translate web API has per-request text length limits; very text-heavy slides may require splitting in future improvements.
 - Does not handle text embedded inside **images or diagrams**—only text boxes are translated.
 - No automatic text resizing—if Japanese translation expands the text size, formatting may need manual adjustments.
-- Potential compatibility issues with **Python 3.13+**, as `cgi` module was removed in Python 3.13 which is required by some dependencies like `httpx`.  
+- Potential compatibility issues with **Python 3.13+**, as `cgi` module was removed in Python 3.13 which is required by some dependencies like `httpx`.
   **Recommended: Use Python 3.10 or 3.11 for local running.**
 
 ---
