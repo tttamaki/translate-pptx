@@ -242,6 +242,27 @@ def translate_pptx_standard(input_pptx_file, target_lang='ja', source_lang='auto
     )
 
 
+async def _translate_one_slide_async(prs_bytes, slide_idx, target_lang, source_lang):
+    prs = Presentation(io.BytesIO(prs_bytes))
+    slide_runs = extract_translatable_runs_by_slide(prs)
+    runs = slide_runs[slide_idx] if slide_idx < len(slide_runs) else []
+    pairs = []
+    if runs:
+        async with Translator() as translator:  # type: ignore[attr-defined]
+            pairs = await translate_runs_in_slide(
+                translator, runs, target_lang=target_lang, source_lang=source_lang
+            )
+    out = io.BytesIO()
+    prs.save(out)
+    return out.getvalue(), pairs
+
+
+def translate_one_slide(prs_bytes, slide_idx, target_lang, source_lang):
+    return asyncio.run(
+        _translate_one_slide_async(prs_bytes, slide_idx, target_lang, source_lang)
+    )
+
+
 def merge_two_presentations(pptx1_file, pptx2_file, alternate=True):
     prs1 = Presentation(pptx1_file)
     pptx2_file.seek(0)
@@ -321,40 +342,105 @@ def render_translate_mode():
         step=1,
     )
 
-    if 'translating' not in st.session_state:
-        st.session_state.translating = False
+    for key, default in [
+        ('translating', False),
+        ('stop_requested', False),
+        ('translate_output_bytes', None),
+        ('translate_current_slide', 0),
+        ('translate_total_slides', 0),
+        ('translate_start_time', 0.0),
+        ('translate_target_lang', 'ja'),
+        ('translate_source_lang', 'auto'),
+        ('translate_preview_limit', 10),
+        ('translate_last_pairs', []),
+        ('translate_result', None),
+        ('translate_filename', ''),
+    ]:
+        if key not in st.session_state:
+            st.session_state[key] = default
 
     if uploaded:
         st.success(f"File uploaded: {uploaded.name}")
         if source_lang == target_lang:
             st.error("Source and target languages cannot be the same!")
         else:
-            if st.session_state.translating:
-                st.button("Translating...", disabled=True, key="run-translate")
-                start = time.time()
-                with st.spinner("Translating slides..."):
-                    translated_bytes = translate_pptx_standard(
-                        uploaded,
-                        target_lang,
-                        source_lang,
-                        preview_limit=int(preview_limit),
-                    )
-                uploaded_path = Path(uploaded.name)
-                st.session_state.translate_result = {
-                    'bytes': translated_bytes.getvalue(),
-                    'filename': f"{uploaded_path.stem}_{target_lang}{uploaded_path.suffix}",
-                    'elapsed': time.time() - start,
-                }
-                st.session_state.translating = False
-                st.rerun()
-            else:
+            if not st.session_state.translating:
                 if st.button("🚀 Translate", key="run-translate"):
+                    input_bytes = uploaded.getvalue()
+                    prs = Presentation(io.BytesIO(input_bytes))
+                    new_prs = copy.deepcopy(prs)
+                    buf = io.BytesIO()
+                    new_prs.save(buf)
+                    uploaded_path = Path(uploaded.name)
+                    st.session_state.translate_output_bytes = buf.getvalue()
+                    st.session_state.translate_current_slide = 0
+                    st.session_state.translate_total_slides = len(list(prs.slides))
+                    st.session_state.translate_start_time = time.time()
+                    st.session_state.translate_target_lang = target_lang
+                    st.session_state.translate_source_lang = source_lang
+                    st.session_state.translate_preview_limit = int(preview_limit)
+                    st.session_state.translate_last_pairs = []
+                    st.session_state.translate_result = None
+                    st.session_state.translate_filename = (
+                        f"{uploaded_path.stem}_{target_lang}{uploaded_path.suffix}"
+                    )
                     st.session_state.translating = True
+                    st.session_state.stop_requested = False
+                    st.rerun()
+            else:
+                if st.button("Translating... (press to stop)", key="run-translate"):
+                    st.session_state.stop_requested = True
+
+                idx = st.session_state.translate_current_slide
+                total = st.session_state.translate_total_slides
+                elapsed = time.time() - st.session_state.translate_start_time
+                if total > 0:
+                    avg = elapsed / idx if idx > 0 else 0
+                    eta = (total - idx) * avg
+                    st.progress(
+                        idx / total,
+                        text=f"slide {idx} / {total} | ETA {format_seconds_to_hhmmss(eta)}",
+                    )
+
+                pairs = st.session_state.translate_last_pairs
+                lim = st.session_state.translate_preview_limit
+                if idx > 0:
+                    if pairs:
+                        lines = [f"Slide {idx} translation pairs (showing first {lim})"]
+                        for i, (before, after) in enumerate(pairs, start=1):
+                            lines.append(f"[{i}] {before} --> {after}")
+                        st.code("\n".join(lines).rstrip(), language="text")
+                    else:
+                        st.code(f"Slide {idx}: no translatable text", language="text")
+
+                if st.session_state.stop_requested or idx >= total:
+                    stopped = st.session_state.stop_requested
+                    st.session_state.translate_result = {
+                        'bytes': st.session_state.translate_output_bytes,
+                        'filename': st.session_state.translate_filename,
+                        'elapsed': elapsed,
+                        'stopped': stopped,
+                    }
+                    st.session_state.translating = False
+                    st.rerun()
+                else:
+                    out_bytes, pairs = translate_one_slide(
+                        st.session_state.translate_output_bytes,
+                        idx,
+                        st.session_state.translate_target_lang,
+                        st.session_state.translate_source_lang,
+                    )
+                    st.session_state.translate_output_bytes = out_bytes
+                    st.session_state.translate_last_pairs = pairs[:lim]
+                    st.session_state.translate_current_slide = idx + 1
                     st.rerun()
 
         result = st.session_state.get('translate_result')
         if result:
-            st.success(f"Translated in {result['elapsed']:.1f} seconds!")
+            if result.get('stopped'):
+                st.warning(f"Stopped after {result['elapsed']:.1f} seconds. Partial translation saved.")
+            else:
+                st.success(f"Translated in {result['elapsed']:.1f} seconds!")
             st.download_button(
                 "⬇️ Download Translated PPTX",
                 data=result['bytes'],
